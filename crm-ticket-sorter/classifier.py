@@ -1,209 +1,116 @@
+import json
 import os
 import re
-from dataclasses import dataclass
 
-from models import (
-    CaseType,
-    Department,
-    Severity,
-    TicketRequest,
-    TicketResponse,
-)
+import anthropic
 
-CASE_KEYWORDS: dict[CaseType, tuple[str, ...]] = {
-    "wrong_transfer": (
-        "wrong number",
-        "wrong account",
-        "wrong recipient",
-        "sent to wrong",
-        "mistaken transfer",
-        "incorrect number",
-        "ভুল নম্বর",
-        "ভুল একাউন্ট",
-        "ভুল নম্বরে",
-        "ভুলে পাঠিয়েছি",
-    ),
-    "payment_failed": (
-        "payment failed",
-        "transaction failed",
-        "could not pay",
-        "payment not working",
-        "declined",
-        "টাকা যায়নি",
-        "পেমেন্ট ফেইল",
-        "লেনদেন ব্যর্থ",
-        "ট্রানজেকশন ফেইল",
-    ),
-    "refund_request": (
-        "refund",
-        "money back",
-        "return my money",
-        "reverse transaction",
-        "ফেরত",
-        "রিফান্ড",
-        "টাকা ফেরত",
-        "রিফান্ড চাই",
-    ),
-    "phishing_or_social_engineering": (
-        "otp",
-        "one time password",
-        "verify account",
-        "click this link",
-        "suspicious call",
-        "scam",
-        "phishing",
-        "fake sms",
-        "পাসওয়ার্ড",
-        "ওটিপি",
-        "ভুয়া",
-        "প্রতারণা",
-        "স্ক্যাম",
-    ),
-}
+MODEL = "claude-sonnet-4-6"
 
-CASE_DEPARTMENT: dict[CaseType, Department] = {
-    "wrong_transfer": "dispute_resolution",
-    "payment_failed": "payments_ops",
-    "refund_request": "dispute_resolution",
-    "phishing_or_social_engineering": "fraud_risk",
-    "other": "customer_support",
-}
+SYSTEM_PROMPT = """You are a fintech customer support ticket classifier.
 
-CASE_SEVERITY: dict[CaseType, Severity] = {
-    "wrong_transfer": "high",
-    "payment_failed": "medium",
-    "refund_request": "medium",
-    "phishing_or_social_engineering": "critical",
-    "other": "low",
-}
+Return ONLY a valid JSON object. No markdown, no code fences, no explanation.
+
+The JSON object must contain exactly these keys:
+- case_type: one of wrong_transfer, payment_failed, refund_request, phishing_or_social_engineering, other
+- severity: one of low, medium, high, critical
+- department: one of customer_support, dispute_resolution, payments_ops, fraud_risk
+- agent_summary: one or two neutral sentences describing the ticket — MUST NEVER mention PIN, OTP, password, or card number
+- confidence: float between 0.0 and 1.0
+
+Classification rules:
+- wrong_transfer → severity: high, department: dispute_resolution
+- payment_failed → severity: high, department: payments_ops
+- phishing_or_social_engineering → severity: critical, department: fraud_risk
+- refund_request → severity: low or medium, department: customer_support or dispute_resolution
+- other → severity: low, department: customer_support
+
+Do not include human_review_required in the JSON."""
 
 
-@dataclass(frozen=True)
-class ClassificationMatch:
-    case_type: CaseType
-    score: float
-    matched_keywords: tuple[str, ...]
+def _fallback_result(ticket_id: str) -> dict:
+    return {
+        "ticket_id": ticket_id,
+        "case_type": "other",
+        "severity": "low",
+        "department": "customer_support",
+        "agent_summary": "Unable to classify the ticket automatically; routed for general review.",
+        "human_review_required": False,
+        "confidence": 0.0,
+    }
 
 
-def _normalize_text(message: str) -> str:
-    return re.sub(r"\s+", " ", message.strip().lower())
+def _extract_json(text: str) -> dict:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+
+    payload = json.loads(cleaned)
+    if not isinstance(payload, dict):
+        raise ValueError("Claude response was not a JSON object")
+    return payload
 
 
-def _score_case_type(message: str, keywords: tuple[str, ...]) -> tuple[float, tuple[str, ...]]:
-    matched = tuple(keyword for keyword in keywords if keyword in message)
-    if not matched:
-        return 0.0, ()
-
-    longest_match = max(len(keyword) for keyword in matched)
-    coverage = min(1.0, longest_match / max(len(message), 1))
-    score = min(1.0, 0.55 + (0.15 * len(matched)) + (0.3 * coverage))
-    return score, matched
+def _compute_human_review_required(case_type: str, severity: str) -> bool:
+    return severity == "critical" or case_type == "phishing_or_social_engineering"
 
 
-def _classify_with_rules(request: TicketRequest) -> ClassificationMatch:
-    normalized_message = _normalize_text(request.message)
-    best_match = ClassificationMatch(case_type="other", score=0.35, matched_keywords=())
-
-    for case_type, keywords in CASE_KEYWORDS.items():
-        score, matched_keywords = _score_case_type(normalized_message, keywords)
-        if score > best_match.score:
-            best_match = ClassificationMatch(
-                case_type=case_type,
-                score=score,
-                matched_keywords=matched_keywords,
-            )
-
-    return best_match
+def _build_user_message(
+    message: str,
+    channel: str | None,
+    locale: str | None,
+) -> str:
+    parts = [f"Message: {message}"]
+    if channel:
+        parts.append(f"Channel: {channel}")
+    if locale:
+        parts.append(f"Locale: {locale}")
+    return "\n".join(parts)
 
 
-def _build_summary(request: TicketRequest, match: ClassificationMatch) -> str:
-    channel = request.channel or "unknown channel"
-    locale = request.locale or "unknown locale"
-    keyword_hint = (
-        f" Matched signals: {', '.join(match.matched_keywords)}."
-        if match.matched_keywords
-        else " No strong keyword match; routed as general inquiry."
-    )
-    return (
-        f"Ticket {request.ticket_id} from {channel} ({locale}) classified as "
-        f"{match.case_type.replace('_', ' ')}.{keyword_hint}"
-    )
+async def classify_ticket(
+    ticket_id: str,
+    message: str,
+    channel: str | None = None,
+    locale: str | None = None,
+) -> dict:
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set")
 
+    client = anthropic.AsyncAnthropic(api_key=api_key)
 
-def _human_review_required(case_type: CaseType, severity: Severity, confidence: float) -> bool:
-    if case_type == "phishing_or_social_engineering":
-        return True
-    if severity in {"critical", "high"}:
-        return True
-    return confidence < 0.6
-
-
-def classify_ticket(request: TicketRequest) -> TicketResponse:
-    use_llm = os.getenv("USE_LLM_CLASSIFIER", "false").lower() == "true"
-    if use_llm and os.getenv("OPENAI_API_KEY"):
-        return _classify_with_llm(request)
-
-    match = _classify_with_rules(request)
-    case_type = match.case_type
-    severity = CASE_SEVERITY[case_type]
-    department = CASE_DEPARTMENT[case_type]
-    confidence = round(match.score, 2)
-
-    return TicketResponse(
-        ticket_id=request.ticket_id,
-        case_type=case_type,
-        severity=severity,
-        department=department,
-        agent_summary=_build_summary(request, match),
-        human_review_required=_human_review_required(case_type, severity, confidence),
-        confidence=confidence,
-    )
-
-
-def _classify_with_llm(request: TicketRequest) -> TicketResponse:
     try:
-        from openai import OpenAI
-    except ImportError as exc:
-        raise RuntimeError(
-            "USE_LLM_CLASSIFIER is enabled but openai is not installed."
-        ) from exc
+        response = await client.messages.create(
+            model=MODEL,
+            max_tokens=512,
+            system=SYSTEM_PROMPT,
+            messages=[
+                {
+                    "role": "user",
+                    "content": _build_user_message(message, channel, locale),
+                }
+            ],
+        )
+        raw_text = response.content[0].text
+        parsed = _extract_json(raw_text)
+    except (json.JSONDecodeError, ValueError, IndexError, KeyError, TypeError):
+        return _fallback_result(ticket_id)
+    except anthropic.APIError:
+        return _fallback_result(ticket_id)
 
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    case_type = parsed.get("case_type", "other")
+    severity = parsed.get("severity", "low")
 
-    prompt = (
-        "Classify this CRM support ticket for a mobile financial service.\n"
-        f"Ticket ID: {request.ticket_id}\n"
-        f"Channel: {request.channel or 'unknown'}\n"
-        f"Locale: {request.locale or 'unknown'}\n"
-        f"Message: {request.message}\n\n"
-        "Return JSON with keys: case_type, severity, department, agent_summary, "
-        "human_review_required, confidence."
-    )
-
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a ticket triage assistant. "
-                    "case_type must be one of: wrong_transfer, payment_failed, "
-                    "refund_request, phishing_or_social_engineering, other. "
-                    "severity must be one of: low, medium, high, critical. "
-                    "department must be one of: customer_support, dispute_resolution, "
-                    "payments_ops, fraud_risk. confidence must be between 0 and 1."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0,
-    )
-
-    content = response.choices[0].message.content or "{}"
-    payload = TicketResponse.model_validate_json(
-        content,
-        strict=False,
-    )
-    return payload.model_copy(update={"ticket_id": request.ticket_id})
+    return {
+        "ticket_id": ticket_id,
+        "case_type": case_type,
+        "severity": severity,
+        "department": parsed.get("department", "customer_support"),
+        "agent_summary": parsed.get(
+            "agent_summary",
+            "Ticket received for general customer support review.",
+        ),
+        "human_review_required": _compute_human_review_required(case_type, severity),
+        "confidence": float(parsed.get("confidence", 0.0)),
+    }

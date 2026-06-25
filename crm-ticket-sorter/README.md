@@ -66,10 +66,9 @@ Response (`TicketResponse`):
 }
 ```
 
-## Classification modes
+## Classification
 
-- **Rule-based (default):** keyword matching for English and Bengali phrases.
-- **LLM-based (optional):** set `USE_LLM_CLASSIFIER=true` and provide `OPENAI_API_KEY` in `.env`.
+Tickets are classified via the Anthropic API (`claude-sonnet-4-6`). Set `ANTHROPIC_API_KEY` in `.env`.
 
 ## Supported values
 

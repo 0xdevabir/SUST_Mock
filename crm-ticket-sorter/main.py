@@ -21,6 +21,12 @@ async def health() -> dict[str, str]:
 @app.post("/classify", response_model=TicketResponse)
 async def classify(request: TicketRequest) -> TicketResponse:
     try:
-        return classify_ticket(request)
+        result = await classify_ticket(
+            ticket_id=request.ticket_id,
+            message=request.message,
+            channel=request.channel,
+            locale=request.locale,
+        )
+        return TicketResponse(**result)
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
