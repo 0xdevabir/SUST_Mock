@@ -41,6 +41,47 @@ uvicorn main:app --reload --port 8000
 
 Interactive API docs: [http://localhost:8000/docs](http://localhost:8000/docs)
 
+## Docker (Mac, Windows, Linux)
+
+Works on any OS with [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or Docker Engine + Compose on Linux). The app always listens on port `8000` inside the container; you map a host port with `HOST_PORT`.
+
+From the **repository root** (the folder that contains `docker-compose.yml`):
+
+**macOS / Linux**
+
+```bash
+cp .env.example .env
+# Edit .env and set ANTHROPIC_API_KEY
+
+docker compose up --build
+```
+
+**Windows (PowerShell)**
+
+```powershell
+Copy-Item .env.example .env
+# Edit .env and set ANTHROPIC_API_KEY
+
+docker compose up --build
+```
+
+**Windows (Command Prompt)**
+
+```cmd
+copy .env.example .env
+docker compose up --build
+```
+
+Verify:
+
+```bash
+curl http://localhost:8000/health
+```
+
+Change the host port by setting `HOST_PORT` in `.env` (e.g. `HOST_PORT=3000` → `http://localhost:3000`).
+
+Stop the stack: `docker compose down`
+
 ## API Reference
 
 ### `GET /health`

@@ -3,14 +3,13 @@ services:
     build:
       context: ./crm-ticket-sorter
       dockerfile: Dockerfile
+    container_name: crm-ticket-sorter
     ports:
-      - "${PORT:-8000}:${PORT:-8000}"
+      - "${HOST_PORT:-8000}:8000"
     environment:
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      PORT: ${PORT:-8000}
-    env_file:
-      - path: ./crm-ticket-sorter/.env
-        required: false
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      PORT: "8000"
+    restart: unless-stopped
     healthcheck:
       test:
         [
@@ -23,4 +22,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-    restart: unless-stopped
