@@ -33,21 +33,37 @@ def _fallback_result(ticket_id: str) -> dict:
         "case_type": "other",
         "severity": "low",
         "department": "customer_support",
-        "agent_summary": "Unable to classify the ticket automatically; routed for general review.",
-        "human_review_required": False,
+        "agent_summary": "Unable to classify ticket automatically. Please review manually.",
+        "human_review_required": True,
         "confidence": 0.0,
     }
 
 
-def _extract_json(text: str) -> dict:
+def _strip_markdown_fences(text: str) -> str:
     cleaned = text.strip()
+    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", cleaned, re.DOTALL | re.IGNORECASE)
+    if fenced:
+        return fenced.group(1).strip()
+
     if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\s*```$", "", cleaned)
 
-    payload = json.loads(cleaned)
+    return cleaned.strip()
+
+
+def _parse_response_json(raw_text: str) -> dict:
+    cleaned = _strip_markdown_fences(raw_text)
+    try:
+        payload = json.loads(cleaned)
+    except json.JSONDecodeError:
+        print(f"Failed to parse Claude response:\n{raw_text}")
+        raise
+
     if not isinstance(payload, dict):
+        print(f"Failed to parse Claude response:\n{raw_text}")
         raise ValueError("Claude response was not a JSON object")
+
     return payload
 
 
@@ -93,7 +109,7 @@ async def classify_ticket(
             ],
         )
         raw_text = response.content[0].text
-        parsed = _extract_json(raw_text)
+        parsed = _parse_response_json(raw_text)
     except (json.JSONDecodeError, ValueError, IndexError, KeyError, TypeError):
         return _fallback_result(ticket_id)
     except anthropic.APIError:
